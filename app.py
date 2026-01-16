@@ -5,6 +5,7 @@ import os
 app = Flask(__name__)
 
 EXCEL_FILE = "價格整理.xlsx"
+sheet_name="最新進貨成本"
 
 HTML = """
 <!doctype html>
