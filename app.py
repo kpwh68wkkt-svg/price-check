@@ -1,83 +1,130 @@
+from flask import Flask, render_template_string, request
 import pandas as pd
-import re
-from datetime import datetime
+import os
 
-# 讀取原始輸入
-df_raw = pd.read_excel("進貨明細.xlsx", sheet_name="raw", header=None)
-df_raw.columns = ["raw"]
+# ================= 設定 =================
+CSV_FILE = "LINE_查價_單品快速.csv"
+APP_TITLE = "📱 金紙即時查價"
 
-records = []
+# ================= Flask App =================
+app = Flask(__name__)
 
-for text in df_raw["raw"].dropna():
-    parts = text.split()
+HTML = """
+<!doctype html>
+<html lang="zh-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }}</title>
+<style>
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                 "PingFang TC", "Microsoft JhengHei", sans-serif;
+    margin: 0;
+    background: #f5f5f5;
+}
+.header {
+    background: #222;
+    color: white;
+    padding: 14px;
+    text-align: center;
+    font-size: 20px;
+}
+.container {
+    padding: 12px;
+}
+input {
+    width: 100%;
+    padding: 14px;
+    font-size: 18px;
+    margin-bottom: 12px;
+    border-radius: 8px;
+    border: 1px solid #ccc;
+}
+.card {
+    background: white;
+    border-radius: 10px;
+    padding: 14px;
+    margin-bottom: 10px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+}
+.name {
+    font-size: 18px;
+    font-weight: bold;
+}
+.price {
+    color: #d32f2f;
+    font-size: 22px;
+    margin-top: 6px;
+}
+.date {
+    color: #666;
+    font-size: 14px;
+    margin-top: 4px;
+}
+.empty {
+    text-align: center;
+    color: #888;
+    margin-top: 40px;
+}
+</style>
+</head>
 
-    # 判斷第一欄是不是日期
-    if re.match(r"\d{4}/\d{2}/\d{2}", parts[0]):
-        日期 = pd.to_datetime(parts[0])
-        offset = 1
-    else:
-        日期 = pd.NaT
-        offset = 0
+<body>
+<div class="header">{{ title }}</div>
 
-    品項編號 = parts[offset]
+<div class="container">
+<form method="get">
+    <input type="text" name="q" placeholder="🔍 輸入品名或編號" value="{{ q }}">
+</form>
 
-    # 單價、金額一定在最後
-    單價 = float(parts[-2])
-    金額 = float(parts[-1])
+{% if results %}
+    {% for r in results %}
+    <div class="card">
+        <div class="name">{{ r["品項名稱"] }}（{{ r["品項編號"] }}）</div>
+        <div class="price">{{ r["最新進價"] }}</div>
+        <div class="date">📅 {{ r["最新進貨日"] }}</div>
+    </div>
+    {% endfor %}
+{% else %}
+    {% if q %}
+    <div class="empty">查無資料</div>
+    {% endif %}
+{% endif %}
+</div>
 
-    middle = parts[offset + 1:-2]
+</body>
+</html>
+"""
 
-    # 找「數量+單位」例如 10箱 / 4件 / 2包
-    qty_idx = next(
-        i for i, p in enumerate(middle)
-        if re.match(r"\d+[\u4e00-\u9fff]+", p)
+# ================= 路由 =================
+@app.route("/", methods=["GET"])
+def index():
+    q = request.args.get("q", "").strip()
+
+    if not os.path.exists(CSV_FILE):
+        return f"找不到 {CSV_FILE}，請先執行『金紙進貨整理』程式"
+
+    df = pd.read_csv(CSV_FILE, dtype=str)
+
+    results = []
+    if q:
+        mask = (
+            df["品項名稱"].str.contains(q, case=False, na=False) |
+            df["品項編號"].str.contains(q, case=False, na=False)
+        )
+        results = df[mask].to_dict("records")
+
+    return render_template_string(
+        HTML,
+        title=APP_TITLE,
+        q=q,
+        results=results
     )
 
-    品項名稱 = "".join(middle[:qty_idx])
-    數量 = int(re.search(r"\d+", middle[qty_idx]).group())
-    單位 = re.search(r"[\u4e00-\u9fff]+", middle[qty_idx]).group()
-
-    records.append([
-        日期,
-        品項編號,
-        品項名稱,
-        數量,
-        單位,
-        單價,
-        金額
-    ])
-
-# 結構化資料
-df = pd.DataFrame(records, columns=[
-    "日期", "品項編號", "品項名稱", "數量", "單位", "單價", "金額"
-])
-
-# ===== 價格分析 =====
-this_year = datetime.now().year
-
-latest = (
-    df.dropna(subset=["日期"])
-      .sort_values("日期")
-      .groupby("品項編號")
-      .last()
-      .reset_index()
-)[["品項編號", "品項名稱", "單價", "日期"]]
-
-latest.columns = ["品項編號", "品項名稱", "最新進價", "最新進貨日"]
-
-avg = (
-    df[df["日期"].dt.year == this_year]
-      .groupby(["品項編號", "品項名稱"])["單價"]
-      .mean()
-      .reset_index()
-)
-
-avg.columns = ["品項編號", "品項名稱", "今年平均進價"]
-
-# 輸出
-with pd.ExcelWriter("價格整理.xlsx", engine="openpyxl") as writer:
-    df.to_excel(writer, sheet_name="整理後明細", index=False)
-    latest.to_excel(writer, sheet_name="最新進價", index=False)
-    avg.to_excel(writer, sheet_name="今年平均", index=False)
-
-print("✅ 金紙進貨資料整理完成（支援箱/件/包）")
+# ================= 啟動 =================
+if __name__ == "__main__":
+    print("📱 手機查價啟動中…")
+    print("👉 同一個 Wi-Fi 的手機瀏覽：")
+    print("👉 http://電腦IP:5000")
+    app.run(host="0.0.0.0", port=5000, debug=False)
