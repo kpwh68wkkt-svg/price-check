@@ -5,11 +5,8 @@ import traceback
 
 app = Flask(__name__)
 
-# ========= 設定 =========
 EXCEL_FILE = "價格整理.xlsx"
-SHEET_NAME = "最新進價"   # 只查這個，不動你其他 Sheet
 
-# ========= HTML =========
 HTML = """
 <!DOCTYPE html>
 <html>
@@ -19,9 +16,10 @@ HTML = """
 <title>手機查價</title>
 <style>
 body { font-family: Arial; background:#f6f6f6; padding:20px; }
-input, button { width:100%; padding:10px; font-size:16px; margin-top:10px; }
+input, button { width:100%; padding:12px; font-size:18px; margin-top:10px; }
 .card { background:white; padding:15px; border-radius:10px; margin-top:15px; }
 .err { color:red; white-space:pre-wrap; }
+small { color:#666; }
 </style>
 </head>
 <body>
@@ -29,9 +27,13 @@ input, button { width:100%; padding:10px; font-size:16px; margin-top:10px; }
 <h2>📱 金紙手機查價</h2>
 
 <form method="get">
-  <input name="q" placeholder="輸入品項編號或名稱" value="{{q}}">
+  <input name="q" placeholder="輸入關鍵字（例如：庫錢 / 壽 / 50）" value="{{q}}">
   <button type="submit">查詢</button>
 </form>
+
+{% if sheet %}
+<small>📄 資料來源：{{ sheet }}</small>
+{% endif %}
 
 {% if error %}
 <div class="card err">
@@ -47,50 +49,70 @@ input, button { width:100%; padding:10px; font-size:16px; margin-top:10px; }
 </div>
 {% endfor %}
 
+{% if q and not rows %}
+<div class="card">
+查無資料
+</div>
+{% endif %}
+
 </body>
 </html>
 """
 
-# ========= 主頁 =========
 @app.route("/")
 def index():
     q = request.args.get("q", "").strip()
 
     try:
-        # 1️⃣ 檢查檔案
         if not os.path.exists(EXCEL_FILE):
             raise FileNotFoundError(f"找不到檔案：{EXCEL_FILE}")
 
-        # 2️⃣ 讀 Excel
-        df = pd.read_excel(EXCEL_FILE, sheet_name=SHEET_NAME)
+        xls = pd.ExcelFile(EXCEL_FILE)
 
-        # 3️⃣ 必要欄位檢查
-        need_cols = {"品項編號", "品項名稱", "最新進價"}
-        if not need_cols.issubset(df.columns):
-            raise ValueError(f"缺少欄位，目前欄位：{list(df.columns)}")
+        df = None
+        sheet_used = None
 
-        # 4️⃣ 查詢
+        # 🔍 自動找正確的 Sheet
+        for s in xls.sheet_names:
+            tmp = pd.read_excel(xls, sheet_name=s)
+            if {"品項編號", "品項名稱", "最新進價"}.issubset(tmp.columns):
+                df = tmp.copy()
+                sheet_used = s
+                break
+
+        if df is None:
+            raise ValueError("找不到包含『品項編號 / 品項名稱 / 最新進價』的工作表")
+
+        # 🔧 強制轉型 + 清洗
+        df["品項編號"] = df["品項編號"].astype(str).str.strip()
+        df["品項名稱"] = df["品項名稱"].astype(str).str.strip()
+        df["最新進價"] = df["最新進價"].astype(str).str.strip()
+
+        # 🔍 模糊搜尋（最穩）
         if q:
+            key = q.lower()
             df = df[
-                df["品項編號"].astype(str).str.contains(q, na=False) |
-                df["品項名稱"].astype(str).str.contains(q, na=False)
+                df["品項編號"].str.lower().str.contains(key, regex=False) |
+                df["品項名稱"].str.lower().str.contains(key, regex=False)
             ]
 
-        rows = df.fillna("").to_dict("records")
+        rows = df.to_dict("records")
 
         return app.jinja_env.from_string(HTML).render(
-            q=q, rows=rows, error=""
+            q=q,
+            rows=rows,
+            sheet=sheet_used,
+            error=""
         )
 
     except Exception as e:
-        # ❗關鍵：錯誤直接顯示在手機
         return app.jinja_env.from_string(HTML).render(
             q=q,
             rows=[],
+            sheet="",
             error=str(e) + "\n\n" + traceback.format_exc()
         )
 
-# ========= 啟動 =========
 if __name__ == "__main__":
     print("📱 手機查價啟動中…")
     print("👉 同 Wi-Fi 手機瀏覽：http://電腦IP:5000")
