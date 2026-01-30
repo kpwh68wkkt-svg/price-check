@@ -1,112 +1,83 @@
-from flask import Flask, request, render_template_string
 import pandas as pd
-import os
+import re
+from datetime import datetime
 
-app = Flask(__name__)
+# 讀取原始輸入
+df_raw = pd.read_excel("進貨明細.xlsx", sheet_name="raw", header=None)
+df_raw.columns = ["raw"]
 
-EXCEL_FILE = "價格整理.xlsx"
-sheet_name="最新進貨成本"
+records = []
 
-HTML = """
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>📱 進貨查價</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-body { font-family: Arial; background:#f5f5f5; }
-input { width:100%; padding:12px; font-size:18px; }
-.card {
-  background:white;
-  padding:12px;
-  margin:10px 0;
-  border-radius:8px;
-  box-shadow:0 2px 4px rgba(0,0,0,.1)
-}
-.price { font-size:22px; font-weight:bold }
-.warn { color:red }
-</style>
-</head>
-<body>
+for text in df_raw["raw"].dropna():
+    parts = text.split()
 
-<h2>📦 金紙進貨查價</h2>
+    # 判斷第一欄是不是日期
+    if re.match(r"\d{4}/\d{2}/\d{2}", parts[0]):
+        日期 = pd.to_datetime(parts[0])
+        offset = 1
+    else:
+        日期 = pd.NaT
+        offset = 0
 
-<form method="get">
-  <input name="q" placeholder="輸入 品名 / 編號（例：庫錢、壽金）" value="{{ q }}">
-</form>
+    品項編號 = parts[offset]
 
-{% if error %}
-<p style="color:red">{{ error }}</p>
-{% endif %}
+    # 單價、金額一定在最後
+    單價 = float(parts[-2])
+    金額 = float(parts[-1])
 
-{% for _, r in rows.iterrows() %}
-<div class="card">
-  <div><b>{{ r["品項名稱"] }}</b>（{{ r["品項編號"] }}）</div>
-  <div class="price">最新進貨：${{ r["最新進貨成本"] }}</div>
-  <div>平均成本：${{ r["平均進貨成本"] }}</div>
-  {% if r["狀態"] %}
-    <div class="warn">{{ r["狀態"] }}</div>
-  {% endif %}
-</div>
-{% endfor %}
+    middle = parts[offset + 1:-2]
 
-</body>
-</html>
-"""
-
-def load_data():
-    if not os.path.exists(EXCEL_FILE):
-        return None, "❌ 找不到 Excel（價格整理.xlsx）"
-
-    xls = pd.ExcelFile(EXCEL_FILE)
-    print("📄 偵測到 Sheet：", xls.sheet_names)
-
-    latest = pd.read_excel(EXCEL_FILE, sheet_name="最新進貨成本")
-    avg = pd.read_excel(EXCEL_FILE, sheet_name="平均進貨成本")
-    up = pd.read_excel(EXCEL_FILE, sheet_name="漲價提醒")
-
-    df = latest.merge(
-        avg,
-        on=["品項編號", "品項名稱"],
-        how="left"
+    # 找「數量+單位」例如 10箱 / 4件 / 2包
+    qty_idx = next(
+        i for i, p in enumerate(middle)
+        if re.match(r"\d+[\u4e00-\u9fff]+", p)
     )
 
-    df["狀態"] = df["品項編號"].isin(up["品項編號"]).map(
-        lambda x: "⚠ 近期漲價" if x else ""
-    )
+    品項名稱 = "".join(middle[:qty_idx])
+    數量 = int(re.search(r"\d+", middle[qty_idx]).group())
+    單位 = re.search(r"[\u4e00-\u9fff]+", middle[qty_idx]).group()
 
-    return df, None
+    records.append([
+        日期,
+        品項編號,
+        品項名稱,
+        數量,
+        單位,
+        單價,
+        金額
+    ])
 
-def search(df, keyword):
-    if not keyword:
-        return df
+# 結構化資料
+df = pd.DataFrame(records, columns=[
+    "日期", "品項編號", "品項名稱", "數量", "單位", "單價", "金額"
+])
 
-    keyword = keyword.strip()
+# ===== 價格分析 =====
+this_year = datetime.now().year
 
-    return df[
-        df["品項名稱"].astype(str).str.contains(keyword, na=False) |
-        df["品項編號"].astype(str).str.contains(keyword, na=False)
-    ]
+latest = (
+    df.dropna(subset=["日期"])
+      .sort_values("日期")
+      .groupby("品項編號")
+      .last()
+      .reset_index()
+)[["品項編號", "品項名稱", "單價", "日期"]]
 
-@app.route("/")
-def index():
-    q = request.args.get("q", "")
-    df, error = load_data()
+latest.columns = ["品項編號", "品項名稱", "最新進價", "最新進貨日"]
 
-    if df is None:
-        return render_template_string(HTML, rows=[], q=q, error=error)
+avg = (
+    df[df["日期"].dt.year == this_year]
+      .groupby(["品項編號", "品項名稱"])["單價"]
+      .mean()
+      .reset_index()
+)
 
-    result = search(df, q)
+avg.columns = ["品項編號", "品項名稱", "今年平均進價"]
 
-    return render_template_string(
-        HTML,
-        rows=result,
-        q=q,
-        error=None if len(result) else "⚠ 查無資料"
-    )
+# 輸出
+with pd.ExcelWriter("價格整理.xlsx", engine="openpyxl") as writer:
+    df.to_excel(writer, sheet_name="整理後明細", index=False)
+    latest.to_excel(writer, sheet_name="最新進價", index=False)
+    avg.to_excel(writer, sheet_name="今年平均", index=False)
 
-if __name__ == "__main__":
-    print("📱 手機查價啟動中…")
-    print("👉 同 Wi-Fi 手機瀏覽：http://你的電腦IP:5000")
-    app.run(host="0.0.0.0", port=5000)
+print("✅ 金紙進貨資料整理完成（支援箱/件/包）")
