@@ -1,130 +1,112 @@
-from flask import Flask, render_template_string, request
+from flask import Flask, request, render_template_string
 import pandas as pd
-import os
 
-# ================= 設定 =================
-CSV_FILE = "LINE_查價_單品快速.csv"
-APP_TITLE = "📱 金紙即時查價"
+FILE = "價格整理.xlsx"
 
-# ================= Flask App =================
 app = Flask(__name__)
 
 HTML = """
 <!doctype html>
-<html lang="zh-TW">
+<html>
 <head>
-<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ title }}</title>
+<title>手機查價</title>
 <style>
-body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
-                 "PingFang TC", "Microsoft JhengHei", sans-serif;
-    margin: 0;
-    background: #f5f5f5;
-}
-.header {
-    background: #222;
-    color: white;
-    padding: 14px;
-    text-align: center;
-    font-size: 20px;
-}
-.container {
-    padding: 12px;
-}
-input {
-    width: 100%;
-    padding: 14px;
-    font-size: 18px;
-    margin-bottom: 12px;
-    border-radius: 8px;
-    border: 1px solid #ccc;
-}
-.card {
-    background: white;
-    border-radius: 10px;
-    padding: 14px;
-    margin-bottom: 10px;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.08);
-}
-.name {
-    font-size: 18px;
-    font-weight: bold;
-}
-.price {
-    color: #d32f2f;
-    font-size: 22px;
-    margin-top: 6px;
-}
-.date {
-    color: #666;
-    font-size: 14px;
-    margin-top: 4px;
-}
-.empty {
-    text-align: center;
-    color: #888;
-    margin-top: 40px;
-}
+body { font-family: Arial; padding:15px; background:#f6f6f6; }
+input, select { width:100%; padding:12px; font-size:18px; margin:6px 0; }
+button { width:100%; padding:14px; font-size:18px; background:#2c7be5; color:white; border:none; }
+.card { background:white; padding:12px; margin-top:10px; border-radius:8px; }
+.price { font-size:22px; color:#d6336c; }
 </style>
 </head>
-
 <body>
-<div class="header">{{ title }}</div>
 
-<div class="container">
+<h2>📱 手機查價</h2>
+
 <form method="get">
-    <input type="text" name="q" placeholder="🔍 輸入品名或編號" value="{{ q }}">
+<input name="q" placeholder="品項編號或名稱" value="{{q}}">
+<select name="year">
+<option value="">全部年度</option>
+{% for y in years %}
+<option value="{{y}}" {% if y==year %}selected{% endif %}>{{y}}</option>
+{% endfor %}
+</select>
+
+<input type="date" name="start" value="{{start}}">
+<input type="date" name="end" value="{{end}}">
+
+<button type="submit">查詢</button>
 </form>
 
-{% if results %}
-    {% for r in results %}
-    <div class="card">
-        <div class="name">{{ r["品項名稱"] }}（{{ r["品項編號"] }}）</div>
-        <div class="price">{{ r["最新進價"] }}</div>
-        <div class="date">📅 {{ r["最新進貨日"] }}</div>
-    </div>
-    {% endfor %}
-{% else %}
-    {% if q %}
-    <div class="empty">查無資料</div>
-    {% endif %}
-{% endif %}
+{% for r in rows %}
+<div class="card">
+<b>{{r['品項編號']}} {{r['品項名稱']}}</b><br>
+最新進價：<span class="price">${{r['最新進價']}}</span><br>
+平均成本：${{r['平均進貨成本']}}<br>
+最新進貨日：{{r['最新進貨日']}}
 </div>
+{% endfor %}
 
 </body>
 </html>
 """
 
-# ================= 路由 =================
 @app.route("/", methods=["GET"])
 def index():
-    q = request.args.get("q", "").strip()
+    q = request.args.get("q","").strip()
+    year = request.args.get("year","")
+    start = request.args.get("start","")
+    end = request.args.get("end","")
 
-    if not os.path.exists(CSV_FILE):
-        return f"找不到 {CSV_FILE}，請先執行『金紙進貨整理』程式"
+    df = pd.read_excel(FILE, sheet_name="整理後明細")
+    latest = pd.read_excel(FILE, sheet_name="最新進價")
+    avg = pd.read_excel(FILE, sheet_name="平均進貨成本")
 
-    df = pd.read_csv(CSV_FILE, dtype=str)
+    df["日期"] = pd.to_datetime(df["日期"])
 
-    results = []
+    if year:
+        df = df[df["年度"] == int(year)]
+    if start:
+        df = df[df["日期"] >= start]
+    if end:
+        df = df[df["日期"] <= end]
+
     if q:
-        mask = (
-            df["品項名稱"].str.contains(q, case=False, na=False) |
-            df["品項編號"].str.contains(q, case=False, na=False)
-        )
-        results = df[mask].to_dict("records")
+        df = df[
+            df["品項編號"].astype(str).str.contains(q, case=False) |
+            df["品項名稱"].astype(str).str.contains(q, case=False)
+        ]
+
+    items = df["品項編號"].unique()
+
+    rows = []
+    for code in items:
+        r1 = latest[latest["品項編號"] == code]
+        r2 = avg[avg["品項編號"] == code]
+        if r1.empty:
+            continue
+        rows.append({
+            "品項編號": code,
+            "品項名稱": r1.iloc[0]["品項名稱"],
+            "最新進價": int(r1.iloc[0]["最新進價"]),
+            "最新進貨日": r1.iloc[0]["最新進貨日"],
+            "平均進貨成本": int(r2.iloc[0]["平均進貨成本"]) if not r2.empty else ""
+        })
+
+    years = sorted(df["年度"].dropna().unique())
 
     return render_template_string(
         HTML,
-        title=APP_TITLE,
+        rows=rows,
         q=q,
-        results=results
+        year=year,
+        years=years,
+        start=start,
+        end=end
     )
 
-# ================= 啟動 =================
 if __name__ == "__main__":
     print("📱 手機查價啟動中…")
-    print("👉 同一個 Wi-Fi 的手機瀏覽：")
-    print("👉 http://電腦IP:5000")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    print("👉 同一個 Wi-Fi 手機瀏覽：")
+    print("👉 http://你的電腦IP:5000")
+    app.run(host="0.0.0.0", port=5000)
